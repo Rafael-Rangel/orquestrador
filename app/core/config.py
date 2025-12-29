@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"  # Ignora variáveis extras (como SUPABASE_URL, etc)
 
 @lru_cache()
 def get_settings():
