@@ -1,8 +1,8 @@
 """
 Serviço de download - stateless
 Recebe dados, faz download e salva organizado
+Suporta múltiplos métodos: pytube (principal) e yt-dlp (fallback)
 """
-import yt_dlp
 import os
 import logging
 from typing import Optional
@@ -27,6 +27,7 @@ class DownloaderService:
         """
         Faz download de um vídeo
         Organiza por: downloads/{grupo}/{fonte}/{video_id}.mp4
+        Tenta primeiro com pytube, depois yt-dlp como fallback
         """
         # Organizar estrutura de pastas
         if group_name and source_name:
@@ -39,29 +40,84 @@ class DownloaderService:
         os.makedirs(download_dir, exist_ok=True)
         output_path = os.path.join(download_dir, f"{external_video_id}.mp4")
 
-        # Configurar opções do yt-dlp para contornar bloqueios do YouTube
+        # Tentar primeiro com pytube (mais simples, funciona melhor na VPS)
+        try:
+            logger.info(f"Trying pytube for {external_video_id}")
+            result = await self._download_with_pytube(video_url, output_path)
+            if result["status"] == "completed":
+                return result
+            else:
+                logger.warning(f"pytube failed, trying yt-dlp: {result.get('error')}")
+        except Exception as e:
+            logger.warning(f"pytube error, trying yt-dlp: {e}")
+
+        # Fallback para yt-dlp
+        try:
+            logger.info(f"Trying yt-dlp for {external_video_id}")
+            return await self._download_with_ytdlp(video_url, output_path, external_video_id)
+        except Exception as e:
+            logger.error(f"Both methods failed for {external_video_id}: {e}")
+            return {"status": "failed", "error": f"pytube and yt-dlp failed: {str(e)}"}
+
+    async def _download_with_pytube(self, video_url: str, output_path: str):
+        """Download usando pytube (método principal)"""
+        try:
+            from pytube import YouTube
+            
+            # Criar objeto YouTube
+            yt = YouTube(video_url)
+            
+            # Pegar melhor stream (vídeo + áudio ou melhor qualidade)
+            try:
+                # Tentar pegar stream progressivo (vídeo + áudio juntos)
+                stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+                if not stream:
+                    # Se não tiver progressivo, pegar melhor vídeo
+                    stream = yt.streams.filter(only_video=True, file_extension='mp4').order_by('resolution').desc().first()
+            except:
+                # Fallback: pegar qualquer stream MP4
+                stream = yt.streams.filter(file_extension='mp4').first()
+            
+            if not stream:
+                return {"status": "failed", "error": "No MP4 stream available"}
+            
+            # Download
+            stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
+            
+            # Verificar se arquivo foi criado
+            if os.path.exists(output_path):
+                logger.info(f"Downloaded with pytube: {output_path}")
+                return {"status": "completed", "path": output_path}
+            else:
+                # Pytube pode salvar com extensão diferente
+                base_path = output_path.replace('.mp4', '')
+                for ext in ['.mp4', '.webm', '.3gp']:
+                    if os.path.exists(base_path + ext):
+                        final_path = base_path + ext
+                        logger.info(f"Downloaded with pytube: {final_path}")
+                        return {"status": "completed", "path": final_path}
+                
+                return {"status": "failed", "error": "File not found after download"}
+                
+        except Exception as e:
+            logger.error(f"pytube download failed: {e}")
+            return {"status": "failed", "error": f"pytube error: {str(e)}"}
+
+    async def _download_with_ytdlp(self, video_url: str, output_path: str, external_video_id: str):
+        """Download usando yt-dlp (fallback)"""
+        import yt_dlp
+        
         cookies_path = os.path.join(os.path.dirname(__file__), '../../data/cookies.txt')
         cookies_path = os.path.abspath(cookies_path)
-        
-        # Determinar qual cliente usar baseado na disponibilidade de cookies
-        # Com EJS instalado, tv_embedded funciona melhor com cookies
-        # Estratégia: tv_embedded primeiro (melhor com cookies + EJS), depois android
         has_cookies = os.path.exists(cookies_path)
         
-        if has_cookies:
-            # Com cookies + EJS: tv_embedded funciona melhor, depois android como fallback
-            # tv_embedded suporta cookies e com EJS resolve desafios JS
-            player_clients = ['tv_embedded', 'tv', 'android', 'web_embedded']
-        else:
-            # Sem cookies, tentar android primeiro (funciona localmente)
-            # Se falhar na VPS, tentar outros
-            player_clients = ['android', 'tv', 'web']
+        # Estratégia simplificada: tentar android primeiro (funciona melhor)
+        player_clients = ['android', 'tv', 'web']
         
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
             'quiet': False,
-            # Opções para contornar bloqueios do YouTube
             'extractor_args': {
                 'youtube': {
                     'player_client': player_clients,
@@ -71,16 +127,15 @@ class DownloaderService:
             'referer': 'https://www.youtube.com/',
         }
         
-        # Adicionar cookies se o arquivo existir
         if has_cookies:
             ydl_opts['cookiefile'] = cookies_path
-            logger.info(f"Using cookies file: {cookies_path} with web client")
-
+            logger.info(f"Using cookies file: {cookies_path}")
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
-            logger.info(f"Downloaded: {output_path}")
+            logger.info(f"Downloaded with yt-dlp: {output_path}")
             return {"status": "completed", "path": output_path}
         except Exception as e:
-            logger.error(f"Download failed for {external_video_id}: {e}")
-            return {"status": "failed", "error": str(e)}
+            logger.error(f"yt-dlp download failed: {e}")
+            return {"status": "failed", "error": f"yt-dlp error: {str(e)}"}
