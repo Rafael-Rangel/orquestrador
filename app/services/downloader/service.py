@@ -44,18 +44,14 @@ class DownloaderService:
         cookies_path = os.path.abspath(cookies_path)
         
         # Determinar qual cliente usar baseado na disponibilidade de cookies
-        # Problema: clientes que suportam cookies precisam de JS runtime
-        # Solução: tentar android primeiro mesmo com cookies (ignora cookies)
-        # Se android falhar, tentar outros clientes
+        # Com EJS instalado, tv_embedded funciona melhor com cookies
+        # Estratégia: tv_embedded primeiro (melhor com cookies + EJS), depois android
         has_cookies = os.path.exists(cookies_path)
         
-        # Estratégia: sempre tentar android primeiro (mais confiável)
-        # Se android falhar (bloqueado), tentar clientes que suportam cookies
-        # Nota: android ignora cookies mas funciona melhor na maioria dos casos
         if has_cookies:
-            # Com cookies disponíveis, tentar android primeiro (ignora cookies mas funciona)
-            # Se android falhar, tentar clientes que suportam cookies
-            player_clients = ['android', 'tv', 'tv_embedded', 'web_embedded']
+            # Com cookies + EJS: tv_embedded funciona melhor, depois android como fallback
+            # tv_embedded suporta cookies e com EJS resolve desafios JS
+            player_clients = ['tv_embedded', 'tv', 'android', 'web_embedded']
         else:
             # Sem cookies, tentar android primeiro (funciona localmente)
             # Se falhar na VPS, tentar outros

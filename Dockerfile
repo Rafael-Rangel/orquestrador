@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
+# Instalar EJS solver para desafios JavaScript do YouTube
+RUN npm install -g ejs
+
 # Copiar requirements e instalar dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
