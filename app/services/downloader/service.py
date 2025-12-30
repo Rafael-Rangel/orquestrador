@@ -39,11 +39,28 @@ class DownloaderService:
         os.makedirs(download_dir, exist_ok=True)
         output_path = os.path.join(download_dir, f"{external_video_id}.mp4")
 
+        # Configurar opções do yt-dlp para contornar bloqueios do YouTube
+        cookies_path = os.path.join(os.path.dirname(__file__), '../../data/cookies.txt')
+        cookies_path = os.path.abspath(cookies_path)
+        
         ydl_opts = {
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
             'quiet': False,
+            # Opções para contornar bloqueios do YouTube
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],  # Tenta múltiplos clientes
+                }
+            },
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'referer': 'https://www.youtube.com/',
         }
+        
+        # Adicionar cookies se o arquivo existir
+        if os.path.exists(cookies_path):
+            ydl_opts['cookiefile'] = cookies_path
+            logger.info(f"Using cookies file: {cookies_path}")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
