@@ -44,14 +44,14 @@ class DownloaderService:
         cookies_path = os.path.abspath(cookies_path)
         
         # Determinar qual cliente usar baseado na disponibilidade de cookies
-        # android não suporta cookies
-        # web precisa de JavaScript runtime (pode falhar)
-        # ios funciona bem com cookies e não precisa de JS runtime
+        # Apenas o cliente "web" suporta cookies
+        # Com Node.js instalado, o cliente web pode funcionar com cookies
         has_cookies = os.path.exists(cookies_path)
         
         if has_cookies:
-            # Com cookies, usar ios primeiro (funciona bem com cookies, sem JS), depois web
-            player_clients = ['ios', 'web']
+            # Com cookies, usar apenas web (único que suporta cookies)
+            # Node.js está instalado no Dockerfile para suportar JS runtime
+            player_clients = ['web']
         else:
             # Sem cookies, tentar android primeiro (menos bloqueios), depois web
             player_clients = ['android', 'web']
