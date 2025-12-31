@@ -34,8 +34,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Instalar yt-dlp para fallback
-RUN pip install --no-cache-dir yt-dlp
+# yt-dlp e pytubefix já estão no requirements.txt, mas garantir versão atualizada
+RUN pip install --no-cache-dir --upgrade yt-dlp pytubefix
 
 # Instalar browsers do Playwright
 RUN playwright install chromium
