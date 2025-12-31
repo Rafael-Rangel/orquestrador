@@ -1,10 +1,14 @@
 """
-Serviço de download usando Playwright
-Simula navegador real para fazer download de vídeos do YouTube
+Serviço de download usando múltiplas estratégias gratuitas
+1. Playwright para extrair URL (se disponível)
+2. yt-dlp via subprocess (se disponível)
+3. Requests + parsing manual (sempre disponível)
 """
 import os
 import logging
 import httpx
+import re
+import json
 from typing import Optional
 from app.core.config import get_settings
 
@@ -25,7 +29,7 @@ class DownloaderService:
         source_name: Optional[str] = None
     ):
         """
-        Faz download de um vídeo usando Playwright
+        Faz download de um vídeo usando múltiplas estratégias
         Organiza por: downloads/{grupo}/{fonte}/{video_id}.mp4
         """
         # Organizar estrutura de pastas
@@ -39,230 +43,66 @@ class DownloaderService:
         os.makedirs(download_dir, exist_ok=True)
         output_path = os.path.join(download_dir, f"{external_video_id}.mp4")
 
-        # Usar Playwright para fazer download
-        try:
-            logger.info(f"Starting Playwright download for {external_video_id}")
-            result = await self._download_with_playwright(video_url, output_path)
-            return result
-        except Exception as e:
-            logger.error(f"Playwright download failed for {external_video_id}: {e}")
-            return {"status": "failed", "error": f"Playwright error: {str(e)}"}
+        # Verificar se arquivo já existe e está completo
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:  # Pelo menos 1KB
+            logger.info(f"File already exists: {output_path} ({os.path.getsize(output_path)} bytes)")
+            return {"status": "completed", "path": output_path}
 
-    async def _download_with_playwright(self, video_url: str, output_path: str):
-        """Download usando Playwright - simula navegador real"""
-        try:
-            from playwright.async_api import async_playwright
-            import re
-            import json
-            
-            async with async_playwright() as p:
-                # Lançar navegador headless
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-accelerated-2d-canvas',
-                        '--disable-gpu'
-                    ]
-                )
+        # Tentar múltiplas estratégias em ordem
+        strategies = [
+            ("yt-dlp", self._download_with_ytdlp),
+            ("Playwright", self._download_with_playwright),
+            ("Requests", self._download_with_requests),
+        ]
+        
+        for strategy_name, strategy_func in strategies:
+            try:
+                logger.info(f"Trying {strategy_name} for {external_video_id}")
+                result = await strategy_func(video_url, output_path)
                 
-                context = await browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                )
+                # Verificar se arquivo foi criado mesmo se status não for "completed"
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    logger.info(f"Success with {strategy_name} - file created ({os.path.getsize(output_path)} bytes)")
+                    return {"status": "completed", "path": output_path}
                 
-                page = await context.new_page()
-                
-                # Navegar até o vídeo
-                logger.info(f"Navigating to {video_url}")
-                await page.goto(video_url, wait_until='networkidle', timeout=60000)
-                
-                # Aguardar vídeo carregar
-                await page.wait_for_timeout(3000)
-                
-                # Tentar extrair URL do vídeo de várias formas
-                video_url_direct = None
-                
-                # Método 1: Tentar encontrar URL no player
-                try:
-                    # Esperar pelo player do YouTube
-                    await page.wait_for_selector('video', timeout=10000)
-                    
-                    # Tentar pegar src do elemento video
-                    video_element = await page.query_selector('video')
-                    if video_element:
-                        src = await video_element.get_attribute('src')
-                        if src and src.startswith('http'):
-                            video_url_direct = src
-                            logger.info("Found video URL in video element")
-                except Exception as e:
-                    logger.debug(f"Method 1 failed: {e}")
-                
-                # Método 2: Interceptar requisições de mídia ANTES de navegar
-                if not video_url_direct:
-                    try:
-                        video_urls = []
-                        
-                        async def handle_response(response):
-                            url = response.url
-                            # Procurar por URLs de vídeo do YouTube
-                            if 'googlevideo.com' in url and ('videoplayback' in url or 'mime=video' in url):
-                                if 'itag=' in url:
-                                    video_urls.append(url)
-                        
-                        # Adicionar listener antes de navegar
-                        page.on('response', handle_response)
-                        
-                        # Aguardar mais tempo para capturar requisições
-                        await page.wait_for_timeout(10000)
-                        
-                        # Tentar interagir com o player para forçar carregamento
-                        try:
-                            # Clicar no vídeo para iniciar reprodução
-                            video_selector = 'video'
-                            if await page.query_selector(video_selector):
-                                await page.click(video_selector)
-                                await page.wait_for_timeout(3000)
-                        except:
-                            pass
-                        
-                        if video_urls:
-                            # Pegar melhor qualidade (ordenar por itag)
-                            video_urls.sort(key=lambda x: int(x.split('itag=')[1].split('&')[0]) if 'itag=' in x else 0, reverse=True)
-                            video_url_direct = video_urls[0]
-                            logger.info(f"Found video URL from network: {video_url_direct[:100]}...")
-                    except Exception as e:
-                        logger.debug(f"Method 2 failed: {e}")
-                
-                # Método 3: Extrair do JavaScript da página (ytInitialPlayerResponse)
-                if not video_url_direct:
-                    try:
-                        # Executar JavaScript para extrair informações do player
-                        video_info = await page.evaluate("""
-                            () => {
-                                // Tentar pegar do ytInitialPlayerResponse (mais confiável)
-                                if (window.ytInitialPlayerResponse) {
-                                    const streamingData = window.ytInitialPlayerResponse.streamingData;
-                                    
-                                    // Tentar formats primeiro (vídeo + áudio)
-                                    if (streamingData && streamingData.formats) {
-                                        const bestFormat = streamingData.formats
-                                            .filter(f => f.mimeType && f.mimeType.includes('video/mp4'))
-                                            .sort((a, b) => {
-                                                // Ordenar por qualidade (width * height)
-                                                const aQuality = (a.width || 0) * (a.height || 0);
-                                                const bQuality = (b.width || 0) * (b.height || 0);
-                                                return bQuality - aQuality;
-                                            })[0];
-                                        if (bestFormat && bestFormat.url && !bestFormat.url.startsWith('blob:')) {
-                                            return bestFormat.url;
-                                        }
-                                    }
-                                    
-                                    // Tentar adaptiveFormats (vídeo separado)
-                                    if (streamingData && streamingData.adaptiveFormats) {
-                                        const bestVideo = streamingData.adaptiveFormats
-                                            .filter(f => f.mimeType && f.mimeType.includes('video/mp4') && !f.mimeType.includes('audio'))
-                                            .sort((a, b) => {
-                                                const aQuality = (a.width || 0) * (a.height || 0);
-                                                const bQuality = (b.width || 0) * (b.height || 0);
-                                                return bQuality - aQuality;
-                                            })[0];
-                                        if (bestVideo && bestVideo.url && !bestVideo.url.startsWith('blob:')) {
-                                            return bestVideo.url;
-                                        }
-                                    }
-                                }
-                                
-                                return null;
-                            }
-                        """)
-                        
-                        if video_info and not video_info.startswith('blob:'):
-                            video_url_direct = video_info
-                            logger.info("Found video URL from JavaScript")
-                    except Exception as e:
-                        logger.debug(f"Method 3 failed: {e}")
-                
-                # Método 3: Usar yt-dlp via subprocess como fallback
-                if not video_url_direct:
-                    logger.info("Could not extract direct URL, trying yt-dlp as fallback")
-                    await browser.close()
-                    return await self._download_with_ytdlp_fallback(video_url, output_path)
-                
-                # Fazer download do vídeo usando httpx com cookies do Playwright
-                if video_url_direct:
-                    # Validar e corrigir URL
-                    if not video_url_direct.startswith(('http://', 'https://')):
-                        # Se for URL relativa, adicionar https://
-                        if video_url_direct.startswith('//'):
-                            video_url_direct = 'https:' + video_url_direct
-                        elif video_url_direct.startswith('/'):
-                            video_url_direct = 'https://www.youtube.com' + video_url_direct
-                        else:
-                            logger.error(f"Invalid URL format: {video_url_direct[:100]}")
-                            await browser.close()
-                            return await self._download_with_ytdlp_fallback(video_url, output_path)
-                    
-                    logger.info(f"Downloading video from direct URL with Playwright cookies...")
-                    
-                    # Obter cookies do contexto do Playwright
-                    cookies = await context.cookies()
-                    cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
-                    
-                    # Headers necessários para download do YouTube
-                    headers = {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Referer': 'https://www.youtube.com/',
-                        'Accept': '*/*',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                    }
-                    
-                    # Fazer download usando httpx com cookies do Playwright
-                    async with httpx.AsyncClient(timeout=300.0, headers=headers, cookies=cookie_dict, follow_redirects=True) as client:
-                        async with client.stream('GET', video_url_direct) as response:
-                            if response.status_code == 403:
-                                logger.warning("403 Forbidden - trying yt-dlp fallback")
-                                await browser.close()
-                                return await self._download_with_ytdlp_fallback(video_url, output_path)
-                            
-                            response.raise_for_status()
-                            total_size = int(response.headers.get('content-length', 0))
-                            
-                            with open(output_path, 'wb') as f:
-                                downloaded = 0
-                                async for chunk in response.aiter_bytes(chunk_size=8192):
-                                    f.write(chunk)
-                                    downloaded += len(chunk)
-                                    if total_size > 0:
-                                        percent = (downloaded / total_size) * 100
-                                        if downloaded % (1024 * 1024) == 0:  # Log a cada MB
-                                            logger.info(f"Downloaded {downloaded}/{total_size} bytes ({percent:.1f}%)")
-                    
-                    await browser.close()
-                    
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                        logger.info(f"Downloaded with Playwright: {output_path}")
-                        return {"status": "completed", "path": output_path}
-                    else:
-                        return {"status": "failed", "error": "File not created or empty"}
+                if result.get('status') == 'completed':
+                    logger.info(f"Success with {strategy_name}")
+                    return result
                 else:
-                    await browser.close()
-                    return {"status": "failed", "error": "Could not extract video URL"}
-                    
-        except Exception as e:
-            logger.error(f"Playwright download failed: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return {"status": "failed", "error": f"Playwright error: {str(e)}"}
+                    logger.warning(f"{strategy_name} failed: {result.get('error')}")
+            except Exception as e:
+                logger.warning(f"{strategy_name} exception: {e}")
+                # Verificar se arquivo foi criado mesmo com exceção
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    logger.info(f"File created despite exception with {strategy_name}")
+                    return {"status": "completed", "path": output_path}
+                continue
+        
+        # Verificar uma última vez se arquivo foi criado
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            logger.info(f"File was created by one of the strategies ({os.path.getsize(output_path)} bytes)")
+            return {"status": "completed", "path": output_path}
+        
+        return {"status": "failed", "error": "All download strategies failed"}
 
-    async def _download_with_ytdlp_fallback(self, video_url: str, output_path: str):
-        """Fallback usando yt-dlp via subprocess"""
+    async def _download_with_ytdlp(self, video_url: str, output_path: str):
+        """Estratégia 1: yt-dlp via subprocess (mais confiável)"""
         try:
             import subprocess
             import asyncio
+            
+            # Verificar se yt-dlp está disponível
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    'yt-dlp', '--version',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await process.communicate()
+                if process.returncode != 0:
+                    raise FileNotFoundError("yt-dlp not found")
+            except FileNotFoundError:
+                return {"status": "failed", "error": "yt-dlp not installed"}
             
             # Usar yt-dlp via subprocess
             cmd = [
@@ -296,9 +136,221 @@ class DownloaderService:
                 
                 return {"status": "failed", "error": "File not found after yt-dlp download"}
             else:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                return {"status": "failed", "error": f"yt-dlp failed: {error_msg}"}
+                error_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Unknown error"
+                return {"status": "failed", "error": f"yt-dlp failed: {error_msg[:200]}"}
                 
+        except FileNotFoundError:
+            return {"status": "failed", "error": "yt-dlp not installed"}
         except Exception as e:
-            logger.error(f"yt-dlp fallback failed: {e}")
-            return {"status": "failed", "error": f"yt-dlp fallback error: {str(e)}"}
+            logger.error(f"yt-dlp error: {e}")
+            return {"status": "failed", "error": f"yt-dlp error: {str(e)}"}
+
+    async def _download_with_playwright(self, video_url: str, output_path: str):
+        """Estratégia 2: Playwright para extrair URL e fazer download"""
+        try:
+            from playwright.async_api import async_playwright
+            
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
+                )
+                
+                context = await browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                )
+                
+                page = await context.new_page()
+                
+                # Interceptar requisições de vídeo
+                video_urls = []
+                
+                async def handle_response(response):
+                    url = response.url
+                    if 'googlevideo.com' in url and 'videoplayback' in url and 'itag=' in url:
+                        if 'mime=video' in url:
+                            video_urls.append(url)
+                
+                page.on('response', handle_response)
+                
+                logger.info(f"Navigating to {video_url}")
+                await page.goto(video_url, wait_until='networkidle', timeout=60000)
+                await page.wait_for_timeout(5000)
+                
+                # Tentar clicar no vídeo para iniciar reprodução
+                try:
+                    video_selector = 'video'
+                    if await page.query_selector(video_selector):
+                        await page.click(video_selector)
+                        await page.wait_for_timeout(3000)
+                except:
+                    pass
+                
+                # Tentar extrair do JavaScript
+                try:
+                    video_info = await page.evaluate("""
+                        () => {
+                            if (window.ytInitialPlayerResponse) {
+                                const streamingData = window.ytInitialPlayerResponse.streamingData;
+                                if (streamingData && streamingData.formats) {
+                                    const best = streamingData.formats
+                                        .filter(f => f.mimeType && f.mimeType.includes('video/mp4'))
+                                        .sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)))[0];
+                                    if (best && best.url) return best.url;
+                                }
+                            }
+                            return null;
+                        }
+                    """)
+                    if video_info and not video_info.startswith('blob:'):
+                        video_urls.append(video_info)
+                except:
+                    pass
+                
+                if not video_urls:
+                    await browser.close()
+                    return {"status": "failed", "error": "Could not extract video URL"}
+                
+                # Pegar melhor URL
+                video_url_direct = video_urls[0]
+                if len(video_urls) > 1:
+                    video_urls.sort(key=lambda x: int(re.search(r'itag=(\d+)', x).group(1)) if re.search(r'itag=(\d+)', x) else 0, reverse=True)
+                    video_url_direct = video_urls[0]
+                
+                # Obter cookies
+                cookies = await context.cookies()
+                cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+                
+                await browser.close()
+                
+                # Fazer download com httpx
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.youtube.com/',
+                    'Accept': '*/*',
+                }
+                
+                async with httpx.AsyncClient(timeout=300.0, headers=headers, cookies=cookie_dict, follow_redirects=True) as client:
+                    async with client.stream('GET', video_url_direct) as response:
+                        if response.status_code == 403:
+                            return {"status": "failed", "error": "403 Forbidden"}
+                        
+                        response.raise_for_status()
+                        
+                        with open(output_path, 'wb') as f:
+                            async for chunk in response.aiter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return {"status": "completed", "path": output_path}
+                else:
+                    return {"status": "failed", "error": "File not created or empty"}
+                    
+        except ImportError:
+            return {"status": "failed", "error": "Playwright not installed"}
+        except Exception as e:
+            logger.error(f"Playwright error: {e}")
+            return {"status": "failed", "error": f"Playwright error: {str(e)}"}
+
+    async def _download_with_requests(self, video_url: str, output_path: str):
+        """Estratégia 3: Requests + parsing manual (100% gratuito, sem dependências externas)"""
+        try:
+            import requests
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            
+            # Fazer requisição para a página do vídeo
+            logger.info(f"Fetching page with requests: {video_url}")
+            response = requests.get(video_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            html = response.text
+            
+            # Extrair ytInitialPlayerResponse do HTML
+            video_url_direct = None
+            
+            # Procurar por ytInitialPlayerResponse
+            pattern = r'var ytInitialPlayerResponse = ({.+?});'
+            match = re.search(pattern, html)
+            
+            if match:
+                try:
+                    player_response = json.loads(match.group(1))
+                    streaming_data = player_response.get('streamingData', {})
+                    
+                    # Tentar formats primeiro
+                    formats = streaming_data.get('formats', [])
+                    if formats:
+                        best_format = max(
+                            [f for f in formats if 'video/mp4' in f.get('mimeType', '')],
+                            key=lambda f: (f.get('width', 0) * f.get('height', 0)),
+                            default=None
+                        )
+                        if best_format and best_format.get('url'):
+                            video_url_direct = best_format['url']
+                    
+                    # Se não encontrou, tentar adaptiveFormats
+                    if not video_url_direct:
+                        adaptive_formats = streaming_data.get('adaptiveFormats', [])
+                        if adaptive_formats:
+                            best_video = max(
+                                [f for f in adaptive_formats if 'video/mp4' in f.get('mimeType', '') and 'audio' not in f.get('mimeType', '')],
+                                key=lambda f: (f.get('width', 0) * f.get('height', 0)),
+                                default=None
+                            )
+                            if best_video and best_video.get('url'):
+                                video_url_direct = best_video['url']
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.debug(f"Failed to parse player response: {e}")
+            
+            if not video_url_direct:
+                return {"status": "failed", "error": "Could not extract video URL from HTML"}
+            
+            # Fazer download
+            logger.info(f"Downloading from extracted URL...")
+            download_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.youtube.com/',
+                'Accept': '*/*',
+            }
+            
+            download_response = requests.get(video_url_direct, headers=download_headers, stream=True, timeout=300)
+            
+            if download_response.status_code == 403:
+                return {"status": "failed", "error": "403 Forbidden - YouTube blocked request"}
+            
+            download_response.raise_for_status()
+            
+            total_size = int(download_response.headers.get('content-length', 0))
+            
+            with open(output_path, 'wb') as f:
+                downloaded = 0
+                for chunk in download_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0 and downloaded % (1024 * 1024) == 0:
+                            percent = (downloaded / total_size) * 100
+                            logger.info(f"Downloaded {downloaded}/{total_size} bytes ({percent:.1f}%)")
+            
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return {"status": "completed", "path": output_path}
+            else:
+                return {"status": "failed", "error": "File not created or empty"}
+                
+        except ImportError:
+            return {"status": "failed", "error": "requests library not installed"}
+        except Exception as e:
+            logger.error(f"Requests error: {e}")
+            return {"status": "failed", "error": f"Requests error: {str(e)}"}

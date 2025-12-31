@@ -44,7 +44,7 @@ async def test():
         if os.path.exists(path):
             size = os.path.getsize(path)
             print(f"Tamanho: {size:,} bytes ({size/1024/1024:.2f} MB)")
-            print("✅ Download concluído com sucesso!")
+            print("Download concluido com sucesso!")
     else:
         print(f"ERROR: {result.get('error')}")
         print("ERROR: Download falhou!")

@@ -301,3 +301,4 @@ docker stop <container-id>
 
 **Pronto!** Sua VPS está atualizada com a nova versão sem banco de dados! 🎉
 
+
