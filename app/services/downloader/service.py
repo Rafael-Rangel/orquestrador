@@ -60,12 +60,17 @@ class DownloaderService:
             return {"status": "failed", "error": f"pytube and yt-dlp failed: {str(e)}"}
 
     async def _download_with_pytube(self, video_url: str, output_path: str):
-        """Download usando pytube (método principal)"""
+        """Download usando pytubefix (versão atualizada do pytube)"""
         try:
-            from pytube import YouTube
+            from pytubefix import YouTube
+            from pytubefix.streams import Stream
             
-            # Criar objeto YouTube
-            yt = YouTube(video_url)
+            # Criar objeto YouTube com headers customizados para evitar bloqueios
+            yt = YouTube(
+                video_url,
+                use_oauth=False,
+                allow_oauth_cache=True
+            )
             
             # Pegar melhor stream (vídeo + áudio ou melhor qualidade)
             try:
@@ -86,22 +91,22 @@ class DownloaderService:
             
             # Verificar se arquivo foi criado
             if os.path.exists(output_path):
-                logger.info(f"Downloaded with pytube: {output_path}")
+                logger.info(f"Downloaded with pytubefix: {output_path}")
                 return {"status": "completed", "path": output_path}
             else:
-                # Pytube pode salvar com extensão diferente
+                # Pytubefix pode salvar com extensão diferente
                 base_path = output_path.replace('.mp4', '')
                 for ext in ['.mp4', '.webm', '.3gp']:
                     if os.path.exists(base_path + ext):
                         final_path = base_path + ext
-                        logger.info(f"Downloaded with pytube: {final_path}")
+                        logger.info(f"Downloaded with pytubefix: {final_path}")
                         return {"status": "completed", "path": final_path}
                 
                 return {"status": "failed", "error": "File not found after download"}
                 
         except Exception as e:
-            logger.error(f"pytube download failed: {e}")
-            return {"status": "failed", "error": f"pytube error: {str(e)}"}
+            logger.error(f"pytubefix download failed: {e}")
+            return {"status": "failed", "error": f"pytubefix error: {str(e)}"}
 
     async def _download_with_ytdlp(self, video_url: str, output_path: str, external_video_id: str):
         """Download usando yt-dlp (fallback)"""
