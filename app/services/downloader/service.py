@@ -22,20 +22,54 @@ class DownloaderService:
         pass
 
     def _sanitize_filename(self, filename: str, max_length: int = 200) -> str:
-        """Limpa o nome do arquivo removendo caracteres inválidos"""
+        """Limpa o nome do arquivo criando um slug: minúsculo, sem acentos, sem emojis, espaços viram underscores"""
         import re
-        # Remover caracteres especiais, manter apenas letras, números, espaços e alguns caracteres
+        import unicodedata
+        
+        # Remover emojis e caracteres especiais
+        # Remove emojis (Unicode ranges para emojis)
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F600-\U0001F64F"  # emoticons
+            "\U0001F300-\U0001F5FF"  # symbols & pictographs
+            "\U0001F680-\U0001F6FF"  # transport & map symbols
+            "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+            "\U00002702-\U000027B0"
+            "\U000024C2-\U0001F251"
+            "]+", flags=re.UNICODE
+        )
+        filename = emoji_pattern.sub('', filename)
+        
+        # Normalizar Unicode (NFD = Normalized Form Decomposed)
+        # Isso separa acentos dos caracteres
+        filename = unicodedata.normalize('NFD', filename)
+        
+        # Remover acentos (tudo que não é ASCII básico)
+        filename = ''.join(char for char in filename if unicodedata.category(char) != 'Mn')
+        
+        # Converter para minúsculas
+        filename = filename.lower()
+        
+        # Remover caracteres inválidos para nome de arquivo
         filename = re.sub(r'[<>:"/\\|?*]', '', filename)
-        # Substituir múltiplos espaços por um único
-        filename = re.sub(r'\s+', ' ', filename)
-        # Remover espaços no início e fim
-        filename = filename.strip()
+        
+        # Substituir espaços e caracteres especiais por underscore
+        filename = re.sub(r'[\s\-_\.]+', '_', filename)
+        
+        # Remover underscores múltiplos
+        filename = re.sub(r'_+', '_', filename)
+        
+        # Remover underscores no início e fim
+        filename = filename.strip('_')
+        
         # Limitar tamanho
         if len(filename) > max_length:
-            filename = filename[:max_length]
+            filename = filename[:max_length].rstrip('_')
+        
         # Se ficar vazio, usar um nome padrão
         if not filename:
             filename = "video"
+        
         return filename
 
     async def _get_video_title(self, video_url: str) -> Optional[str]:
@@ -93,7 +127,7 @@ class DownloaderService:
             logger.info(f"Using video title as filename: {filename}")
         else:
             # Fallback para external_video_id se não conseguir o título
-            output_path = os.path.join(download_dir, f"{external_video_id}.mp4")
+        output_path = os.path.join(download_dir, f"{external_video_id}.mp4")
             logger.warning(f"Could not get video title, using external_video_id: {external_video_id}")
 
         # Verificar se arquivo já existe e está completo
@@ -156,9 +190,9 @@ class DownloaderService:
             import yt_dlp
             
             # Configurações do yt-dlp
-            ydl_opts = {
+        ydl_opts = {
                 'format': 'best[ext=mp4]/best',
-                'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
+            'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
@@ -411,7 +445,7 @@ class DownloaderService:
                                 f.write(chunk)
                 
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    return {"status": "completed", "path": output_path}
+            return {"status": "completed", "path": output_path}
                 else:
                     return {"status": "failed", "error": "File not created or empty"}
                     
