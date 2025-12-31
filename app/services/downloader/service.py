@@ -136,27 +136,42 @@ class DownloaderService:
                     except Exception as e:
                         logger.debug(f"Method 2 failed: {e}")
                 
-                # Método 3: Extrair do JavaScript da página
+                # Método 3: Extrair do JavaScript da página (ytInitialPlayerResponse)
                 if not video_url_direct:
                     try:
                         # Executar JavaScript para extrair informações do player
                         video_info = await page.evaluate("""
                             () => {
-                                // Tentar pegar informações do player
-                                const player = document.querySelector('video');
-                                if (player && player.src) {
-                                    return player.src;
-                                }
-                                
-                                // Tentar pegar do ytInitialPlayerResponse
+                                // Tentar pegar do ytInitialPlayerResponse (mais confiável)
                                 if (window.ytInitialPlayerResponse) {
-                                    const formats = window.ytInitialPlayerResponse.streamingData;
-                                    if (formats && formats.formats) {
-                                        const bestFormat = formats.formats
-                                            .filter(f => f.mimeType && f.mimeType.includes('video'))
-                                            .sort((a, b) => (b.width || 0) - (a.width || 0))[0];
-                                        if (bestFormat && bestFormat.url) {
+                                    const streamingData = window.ytInitialPlayerResponse.streamingData;
+                                    
+                                    // Tentar formats primeiro (vídeo + áudio)
+                                    if (streamingData && streamingData.formats) {
+                                        const bestFormat = streamingData.formats
+                                            .filter(f => f.mimeType && f.mimeType.includes('video/mp4'))
+                                            .sort((a, b) => {
+                                                // Ordenar por qualidade (width * height)
+                                                const aQuality = (a.width || 0) * (a.height || 0);
+                                                const bQuality = (b.width || 0) * (b.height || 0);
+                                                return bQuality - aQuality;
+                                            })[0];
+                                        if (bestFormat && bestFormat.url && !bestFormat.url.startsWith('blob:')) {
                                             return bestFormat.url;
+                                        }
+                                    }
+                                    
+                                    // Tentar adaptiveFormats (vídeo separado)
+                                    if (streamingData && streamingData.adaptiveFormats) {
+                                        const bestVideo = streamingData.adaptiveFormats
+                                            .filter(f => f.mimeType && f.mimeType.includes('video/mp4') && !f.mimeType.includes('audio'))
+                                            .sort((a, b) => {
+                                                const aQuality = (a.width || 0) * (a.height || 0);
+                                                const bQuality = (b.width || 0) * (b.height || 0);
+                                                return bQuality - aQuality;
+                                            })[0];
+                                        if (bestVideo && bestVideo.url && !bestVideo.url.startsWith('blob:')) {
+                                            return bestVideo.url;
                                         }
                                     }
                                 }
@@ -165,7 +180,7 @@ class DownloaderService:
                             }
                         """)
                         
-                        if video_info:
+                        if video_info and not video_info.startswith('blob:'):
                             video_url_direct = video_info
                             logger.info("Found video URL from JavaScript")
                     except Exception as e:
@@ -177,13 +192,42 @@ class DownloaderService:
                     await browser.close()
                     return await self._download_with_ytdlp_fallback(video_url, output_path)
                 
-                await browser.close()
-                
-                # Fazer download do vídeo usando httpx
+                # Fazer download do vídeo usando httpx com cookies do Playwright
                 if video_url_direct:
-                    logger.info(f"Downloading video from direct URL...")
-                    async with httpx.AsyncClient(timeout=300.0) as client:
+                    # Validar e corrigir URL
+                    if not video_url_direct.startswith(('http://', 'https://')):
+                        # Se for URL relativa, adicionar https://
+                        if video_url_direct.startswith('//'):
+                            video_url_direct = 'https:' + video_url_direct
+                        elif video_url_direct.startswith('/'):
+                            video_url_direct = 'https://www.youtube.com' + video_url_direct
+                        else:
+                            logger.error(f"Invalid URL format: {video_url_direct[:100]}")
+                            await browser.close()
+                            return await self._download_with_ytdlp_fallback(video_url, output_path)
+                    
+                    logger.info(f"Downloading video from direct URL with Playwright cookies...")
+                    
+                    # Obter cookies do contexto do Playwright
+                    cookies = await context.cookies()
+                    cookie_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+                    
+                    # Headers necessários para download do YouTube
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': 'https://www.youtube.com/',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    }
+                    
+                    # Fazer download usando httpx com cookies do Playwright
+                    async with httpx.AsyncClient(timeout=300.0, headers=headers, cookies=cookie_dict, follow_redirects=True) as client:
                         async with client.stream('GET', video_url_direct) as response:
+                            if response.status_code == 403:
+                                logger.warning("403 Forbidden - trying yt-dlp fallback")
+                                await browser.close()
+                                return await self._download_with_ytdlp_fallback(video_url, output_path)
+                            
                             response.raise_for_status()
                             total_size = int(response.headers.get('content-length', 0))
                             
@@ -197,12 +241,15 @@ class DownloaderService:
                                         if downloaded % (1024 * 1024) == 0:  # Log a cada MB
                                             logger.info(f"Downloaded {downloaded}/{total_size} bytes ({percent:.1f}%)")
                     
+                    await browser.close()
+                    
                     if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                         logger.info(f"Downloaded with Playwright: {output_path}")
                         return {"status": "completed", "path": output_path}
                     else:
                         return {"status": "failed", "error": "File not created or empty"}
                 else:
+                    await browser.close()
                     return {"status": "failed", "error": "Could not extract video URL"}
                     
         except Exception as e:
@@ -239,13 +286,15 @@ class DownloaderService:
                 # Verificar se arquivo foi criado
                 if os.path.exists(output_path):
                     return {"status": "completed", "path": output_path}
-                else:
-                    # Procurar arquivo com extensão diferente
-                    base_path = output_path.replace('.mp4', '')
-                    for ext in ['.mp4', '.webm', '.mkv']:
-                        if os.path.exists(base_path + ext):
-                            return {"status": "completed", "path": base_path + ext}
-                    return {"status": "failed", "error": "File not found after yt-dlp download"}
+                
+                # Procurar arquivo com extensão diferente
+                base_path = output_path.replace('.mp4', '')
+                for ext in ['.mp4', '.webm', '.mkv']:
+                    test_path = base_path + ext
+                    if os.path.exists(test_path):
+                        return {"status": "completed", "path": test_path}
+                
+                return {"status": "failed", "error": "File not found after yt-dlp download"}
             else:
                 error_msg = stderr.decode() if stderr else "Unknown error"
                 return {"status": "failed", "error": f"yt-dlp failed: {error_msg}"}
