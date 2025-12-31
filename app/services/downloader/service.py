@@ -97,9 +97,19 @@ class DownloaderService:
             logger.warning(f"Could not get video title, using external_video_id: {external_video_id}")
 
         # Verificar se arquivo já existe e está completo
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:  # Pelo menos 1KB
-            logger.info(f"File already exists: {output_path} ({os.path.getsize(output_path)} bytes)")
-            return {"status": "completed", "path": output_path}
+        # Verificar tanto pelo nome do título quanto pelo video_id (caso já tenha sido baixado antes)
+        existing_path = None
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            existing_path = output_path
+        else:
+            # Verificar se existe com o nome antigo (video_id)
+            old_path = os.path.join(download_dir, f"{external_video_id}.mp4")
+            if os.path.exists(old_path) and os.path.getsize(old_path) > 1000:
+                existing_path = old_path
+        
+        if existing_path:
+            logger.info(f"File already exists: {existing_path} ({os.path.getsize(existing_path)} bytes)")
+            return {"status": "completed", "path": existing_path}
 
         # Tentar múltiplas estratégias em ordem (da mais confiável para menos)
         strategies = [
