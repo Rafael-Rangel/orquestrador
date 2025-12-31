@@ -192,9 +192,9 @@ class DownloaderService:
             import yt_dlp
             
             # Configurações do yt-dlp
-        ydl_opts = {
+            ydl_opts = {
                 'format': 'best[ext=mp4]/best',
-            'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
+                'outtmpl': output_path.replace('.mp4', '.%(ext)s'),
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
